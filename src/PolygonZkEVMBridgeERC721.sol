@@ -3,15 +3,14 @@ pragma solidity ^0.8.13;
 
 import "./lib/ERC721Wrapped.sol";
 import "./interfaces/IBridgeMessageReceiver.sol";
+import "lib/openzeppelin-contracts/contracts/token/ERC721/IERC721.sol";
+import "lib/openzeppelin-contracts/contracts/token/ERC721/IERC721Receiver.sol";
+import "./interfaces/IPolygonZkEVMBridge.sol";
 
-// Deterministic contract address creation using create 2;
-// new_address = keccak256( 0xff ++ address ++ salt ++ keccak256(init_code))[12:]
-// where salt will be, chainID
-//
-// Non deterministic address calculation among networks guarantees the trustless behaviour without the need of an off chain adders synch
-//
 
 contract PolygonZkEVMBridgeERC721 is IBridgeMessageReceiver{
+
+    //** IMMUTABLES **//
 
     // chainID
     uint32  immutable public  networkID;
@@ -24,6 +23,49 @@ contract PolygonZkEVMBridgeERC721 is IBridgeMessageReceiver{
 
     // Keccak256(init_code)
     bytes32 immutable initCodeHash;
+
+
+    //** MAPPINGS **//
+
+    // Representative tokens contracts
+    
+    // Wrapped token Address --> Origin token information
+    mapping(address => TokenInformation) public ERC721wrappedTokenAddressToTokenInfo;
+
+    // keccak256(OriginNetwork || tokenAddress) --> Wrapped token address
+    mapping(bytes32 => address) public tokenInfoToERC721WrappedToken;
+
+    //** STRUCTS **//
+
+    // Wrapped Token information struct
+    struct TokenInformation {
+        uint32 originNetwork;
+        address originTokenAddress;
+    }
+
+    //** EVENTS **//
+
+    event BridgeERC721Event(
+        uint32    originNetwork,
+        address   originTokenAddress,
+        string    name,
+        string    symbol,
+        uint256   tokenId,
+        uint32    destinationNetwork,
+        address   destinationAddress
+    );
+
+    event ClaimERC721Event(
+        uint32    originNetwork,
+        address   originTokenAddress,
+        string    name,
+        string    symbol,
+        uint256   tokenId,
+        uint32    destinationNetwork,
+        address   destinationAddress
+    );
+
+    //** MODIFIERS **//
 
     modifier onlyPolygonZkEVMBridge {
         require (
@@ -52,39 +94,166 @@ contract PolygonZkEVMBridgeERC721 is IBridgeMessageReceiver{
     }
 
     function bridgeERC721(
-        address token,
+        address tokenAddress,
         uint32 destinationNetwork,
         address destinationAddress,
         uint256 tokenId
     ) public {
 
-        require(
-            destinationNetwork != networkID,
-            "PolygonZkEVMBridgeERC721::bridgeERC721: Destination cannot be itself"
-        );
+        // init token properties
+        uint32 originNetwork;
+        address originTokenAddress;
+        string memory name;
+        string memory symbol;
 
-        // TODO
+        // Retireve tokenInformation
+        TokenInformation memory tokenInformation = ERC721wrappedTokenAddressToTokenInfo[tokenAddress];
 
-        // If token, lock and bridge
+        if(tokenInformation.originTokenAddress != address(0)){
+            // Is a Token representer form another network
+        
+            // Burn the token representer       
+            ERC721Wrapped(tokenAddress).burn(tokenId);
 
-        // If representer, burn  and bridge
+            // set token properties
+            originNetwork = tokenInformation.originNetwork;
+            originTokenAddress = tokenInformation.originTokenAddress;
+            name = ERC721Wrapped(tokenAddress).name();
+            symbol = ERC721Wrapped(tokenAddress).symbol();
+
+        } else {
+            // Is a Token original from this network
+
+            // Lock the token
+            IERC721(tokenAddress).transferFrom(msg.sender, address(this) , tokenId);
+
+            // set token properties
+            originNetwork = networkID;
+            originTokenAddress = tokenAddress;
+            name = ERC721(tokenAddress).name();
+            symbol = ERC721(tokenAddress).symbol();
+        }
 
         
+        // compute address of PolygonZkEVMBridgeERC721 in destination network
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                bytes1(0xff),
+                bytes20(deployerAddress),
+                bytes32(uint256(destinationNetwork)), /// PADD ZEROES
+                initCodeHash
+            )
+        );
+        address destinationPolygonZkEVMBridgeERC721Address = address(bytes20(digest<<96));
 
+        // Encode msg payload 
+        bytes memory metadata = abi.encodePacked(
+            originNetwork,
+            originTokenAddress,
+            name,
+            symbol,
+            tokenId,
+            destinationAddress
+        );
+        
 
+        // bridge bridge message 
+        IPolygonZkEVMBridge(polygonZkEVMBridgeAddress).bridgeMessage(destinationNetwork, destinationPolygonZkEVMBridgeERC721Address , metadata);
+
+        // emit BridgeERC721Event
+        emit BridgeERC721Event(
+            originNetwork,
+            originTokenAddress,
+            name,
+            symbol,
+            tokenId,
+            destinationNetwork,
+            destinationAddress
+        );
 
     }
 
 
-    function _claimERC721() internal onlyPolygonZkEVMBridge{
-        //TODO
+    function _claimERC721(bytes memory data) internal onlyPolygonZkEVMBridge{
 
-        // If token, unlock
+        // Init token properties
+        uint32 originNetwork;
+        address originTokenAddress;
+        string memory name;
+        string memory symbol;
+        uint256 tokenId;
+        address destinationAddress;
 
-        // If representer
-            // If contract non deployed, deploy and mint
+        // Decode message payload
+        (
+            originNetwork,
+            originTokenAddress,
+            name,
+            symbol,
+            tokenId,
+            destinationAddress
+        ) = abi.decode(data,(
+            uint32,
+            address,
+            string,
+            string,
+            uint256,
+            address
+        ));            
 
-            // If contract deployed, mint
+        if(originNetwork == networkID) {
+            // Is a Token original from this network
+
+            // Unlock the token
+            IERC721(originTokenAddress).transferFrom(address(this), destinationAddress , tokenId);
+        } else {
+            // Is a Token representer form another network
+
+            // Compute salt for create 2
+            bytes32 tokenInfoHash = keccak256(
+                abi.encodePacked(originNetwork, originTokenAddress)
+            );
+
+            // Check if address is in tokenInfoToERC721WrappedToken mapping
+            address ERC721WrappedTokenAddress = tokenInfoToERC721WrappedToken[tokenInfoHash];
+
+            if(ERC721WrappedTokenAddress == address(0)){
+                // No Token representer deployed
+
+                // Deploy Token representer contract
+                ERC721Wrapped tokenContract = (new ERC721Wrapped){
+                    salt: tokenInfoHash
+                }(name,symbol);
+
+                // Mint Token to destinationAddress
+                tokenContract.mint(destinationAddress, tokenId);
+
+                // Fill mappings
+                ERC721wrappedTokenAddressToTokenInfo[address(tokenContract)] = TokenInformation(
+                    originNetwork,
+                    originTokenAddress
+                );
+
+                tokenInfoToERC721WrappedToken[tokenInfoHash] = address(tokenContract);
+
+            } else {
+                // Token representer already deployed
+
+                // Mint Token to destinationAddress
+                ERC721Wrapped(ERC721WrappedTokenAddress).mint(destinationAddress, tokenId);
+            }
+        }
+
+       // emit BridgeERC721Event
+        emit ClaimERC721Event(
+            originNetwork,
+            originTokenAddress,
+            name,
+            symbol,
+            tokenId,
+            networkID,
+            destinationAddress
+        );
     }
 
 
@@ -93,7 +262,23 @@ contract PolygonZkEVMBridgeERC721 is IBridgeMessageReceiver{
         uint32 originNetwork,
         bytes memory data
     ) external view returns (bool){
-        //TODO check that origin Address maches with the deterministic creation
-        //new_address = hash(0xFF, deployerAddress, salt = originNetwork, bytecode)
+
+        // Compute deterministic origin address
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                bytes1(0xff),
+                bytes20(deployerAddress),
+                bytes32(uint256(originNetwork)),
+                initCodeHash
+            )
+        );
+        address deterministicAddress = address(bytes20(digest<<96));
+ 
+        require(
+            originAddress == deterministicAddress,
+            "PolygonZkEVMBridgeERC721::onMessageReceived: originAddress must be deterministical"
+        );
+
+        _claimERC721(data); //TO FIX ?????
     }
 }

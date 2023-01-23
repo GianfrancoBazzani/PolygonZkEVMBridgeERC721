@@ -17,7 +17,8 @@ contract Create2AddressCalculationTest is Test{
     function testExampleN0() public{
         
         address _address = 0x0000000000000000000000000000000000000000;
-        uint256 salt = 0x0000000000000000000000000000000000000000000000000000000000000000;
+        //uint256 salt = 0x0000000000000000000000000000000000000000000000000000000000000000;
+        uint32 salt = 0x0000000000000000;
         bytes memory init_code = abi.encodePacked(bytes1(0x00));
         address result = 0x4D1A2e2bB4F88F0250f26Ffff098B0b30B26BF38;
 
@@ -26,7 +27,7 @@ contract Create2AddressCalculationTest is Test{
             abi.encodePacked(
                 bytes1(0xff),
                 bytes20(_address),
-                bytes32(salt),
+                bytes32(uint256(salt)),
                 keccak256(init_code)
             )
         );
