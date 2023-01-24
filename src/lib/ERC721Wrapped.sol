@@ -6,9 +6,6 @@ import "lib/openzeppelin-contracts/contracts/token/ERC721/ERC721.sol";
 
 contract ERC721Wrapped is ERC721 {
 
-    // Deployment chain id
-    uint public chainId;
-
     // ERC721 bridging interface address
     address bridgingInterfaceAddress;
 
@@ -22,7 +19,6 @@ contract ERC721Wrapped is ERC721 {
 
     constructor(string memory name, string memory symbol) ERC721(name, symbol) {
         bridgingInterfaceAddress = msg.sender;
-        chainId = block.chainid;
     }
 
     function mint(address to, uint256 tokenId) external onlyBridgingInterface {
